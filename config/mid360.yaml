@@ -34,9 +34,9 @@ rose_lm_node:
                         0.0, 0.0, 1.0]
 
             # 滤波器参数
-            max_iter: 4
+            max_iter: 3
             # R
-            laser_point_cov: 0.01                     # 激光点的协方差
+            laser_point_cov: 0.02                     # 激光点的协方差
             imu_meas_acc_cov: 0.01                     # IMU测量的加速度协方差
             imu_meas_omg_cov: 0.01                     # IMU测量的角速度协方差
             # Q

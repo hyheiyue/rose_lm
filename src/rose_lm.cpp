@@ -122,6 +122,8 @@ public:
                                               << " | Processed Points: "
                                               << small_point_lio_->processed_points
                                               << " | Used Points: " << small_point_lio_->used_points
+                                              << " | Converted Points: "
+                                              << small_point_lio_->estimator_->converged_count
                     );
 
                     window_start = end;
@@ -129,6 +131,7 @@ public:
                     stat_cost = 0.0;
                     small_point_lio_->processed_points = 0;
                     small_point_lio_->used_points = 0;
+                    small_point_lio_->estimator_->converged_count = 0;
                 }
             }
         );

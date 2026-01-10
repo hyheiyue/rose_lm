@@ -49,7 +49,7 @@ namespace small_point_lio {
                 filtered_points.push_back(point);
             }
             if (space_downsample_leaf_size >= 0.01) {
-                downsampler.voxelgrid_sampling(
+                downsampler.voxelgrid_sampling_tbb(
                     filtered_points,
                     processed_pointcloud,
                     space_downsample_leaf_size

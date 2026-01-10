@@ -6,7 +6,9 @@
 
 #include "voxelgrid_sampling.h"
 #include <iostream>
-
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+#include <tbb/parallel_sort.h>
 /**
  * copy from https://github.com/koide3/small_gicp, modified to fit our need.
  * small_gicp is open source under the MIT license: https://github.com/koide3/small_gicp/blob/master/LICENSE
@@ -181,7 +183,6 @@ void VoxelgridSampling::voxelgrid_sampling(
     constexpr size_t coord_bit_mask = (1ull << 21) - 1;
     constexpr int coord_offset = 1 << (coord_bit_size - 1);
 
-    // 1. 计算体素哈希 key
     coord_pt.resize(N);
     for (size_t i = 0; i < N; ++i) {
         const auto& pt = points[i];
@@ -200,12 +201,10 @@ void VoxelgridSampling::voxelgrid_sampling(
         coord_pt[i] = { bits, i };
     }
 
-    // 2. 按 voxel key 排序，使同体素点连续
     std::sort(coord_pt.begin(), coord_pt.end(), [](const auto& a, const auto& b) {
         return a.first < b.first;
     });
 
-    // 3. 线性扫描分组并计算 centroid + count
     downsampled.clear();
     downsampled.reserve(N);
 
@@ -233,10 +232,91 @@ void VoxelgridSampling::voxelgrid_sampling(
             voxel_count = 1;
         }
     }
-
-    // 4. 处理最后一个体素
     rose_lm::common::Point out = sum_pt;
     out.position = sum_pt.position / static_cast<double>(voxel_count);
+    out.timestamp = sum_pt.timestamp;
+    out.count = voxel_count;
+    downsampled.push_back(std::move(out));
+}
+void VoxelgridSampling::voxelgrid_sampling_tbb(
+    const std::vector<rose_lm::common::Point>& points,
+    std::vector<rose_lm::common::Point>& downsampled,
+    double leaf_size
+) {
+    if (points.empty()) {
+        downsampled = points;
+        return;
+    }
+
+    const size_t N = points.size();
+    const double inv_leaf_size = 1.0 / leaf_size;
+
+    constexpr std::uint64_t invalid_coord = std::numeric_limits<std::uint64_t>::max();
+    constexpr int coord_bit_size = 21;
+    constexpr std::uint64_t coord_bit_mask = (1ull << coord_bit_size) - 1;
+    constexpr int coord_offset = 1 << (coord_bit_size - 1);
+
+    coord_pt.resize(N);
+
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, N), [&](const tbb::blocked_range<size_t>& r) {
+        for (size_t i = r.begin(); i != r.end(); ++i) {
+            const auto& pt = points[i];
+            Eigen::Array3i coord = fast_floor(pt.position * inv_leaf_size) + coord_offset;
+
+            if ((coord < 0).any() || (coord > static_cast<int>(coord_bit_mask)).any()) {
+                coord_pt[i] = { invalid_coord, i };
+                continue;
+            }
+
+            std::uint64_t bits = (static_cast<std::uint64_t>(coord[0] & coord_bit_mask) << 0)
+                | (static_cast<std::uint64_t>(coord[1] & coord_bit_mask) << 21)
+                | (static_cast<std::uint64_t>(coord[2] & coord_bit_mask) << 42);
+
+            coord_pt[i] = { bits, i };
+        }
+    });
+
+    tbb::parallel_sort(coord_pt.begin(), coord_pt.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
+
+    downsampled.clear();
+    downsampled.reserve(N);
+
+    size_t idx = 0;
+    while (idx < N && coord_pt[idx].first == invalid_coord)
+        ++idx;
+
+    if (idx == N)
+        return;
+
+    rose_lm::common::Point sum_pt = points[coord_pt[idx].second];
+    int voxel_count = 1;
+
+    for (size_t i = idx + 1; i < N; ++i) {
+        if (coord_pt[i].first == invalid_coord)
+            continue;
+
+        const auto& pt = points[coord_pt[i].second];
+
+        if (coord_pt[i].first == coord_pt[i - 1].first) {
+            sum_pt.position += pt.position;
+            sum_pt.timestamp = pt.timestamp;
+            ++voxel_count;
+        } else {
+            rose_lm::common::Point out = sum_pt;
+            out.position /= static_cast<double>(voxel_count);
+            out.timestamp = sum_pt.timestamp;
+            out.count = voxel_count;
+            downsampled.push_back(std::move(out));
+
+            sum_pt = pt;
+            voxel_count = 1;
+        }
+    }
+
+    rose_lm::common::Point out = sum_pt;
+    out.position /= static_cast<double>(voxel_count);
     out.timestamp = sum_pt.timestamp;
     out.count = voxel_count;
     downsampled.push_back(std::move(out));

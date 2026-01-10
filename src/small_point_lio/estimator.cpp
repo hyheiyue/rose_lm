@@ -77,8 +77,7 @@ namespace small_point_lio {
             ));
         return cov;
     }
-    std::vector<size_t> valid_ids;
-    std::vector<size_t> all_ids;
+
     void Estimator::h_batch(const state& s, std::vector<point_measurement_result>& results) {
         results.clear();
         const size_t N = current_batch.points.size();
@@ -92,9 +91,17 @@ namespace small_point_lio {
         const double match_s = params_.small_point_lio_params.estimator_params.match_sqaured;
         const double laser_cov = params_.small_point_lio_params.estimator_params.laser_point_cov;
         // Use float for point storage to reduce memory bandwidth (tune to your needs)
-        points_odom_frame.clear();
-        points_odom_frame.resize(N, Eigen::Vector3f::Zero());
 
+        if (s.batch_iter == 0) {
+            points_odom_frame.clear();
+            points_odom_frame.resize(N, Eigen::Vector3f::Zero());
+            valid_ids.clear();
+            valid_ids.reserve(N);
+            point_converged.clear();
+            point_converged.resize(N, 0);
+            is_valid.clear();
+            is_valid.resize(N, 0);
+        }
         // pts_imu as float to match odom frame. Compute in double then cast once.
         std::vector<Eigen::Vector3f> pts_imu_f;
         pts_imu_f.resize(N);
@@ -110,6 +117,20 @@ namespace small_point_lio {
             return (Eigen::Matrix3d() << 0, -v.z(), v.y(), v.z(), 0, -v.x(), -v.y(), v.x(), 0)
                 .finished();
         };
+        if (s.batch_iter == 1) {
+            for (size_t id: valid_ids)
+                is_valid[id] = 1;
+
+            for (size_t i = 0; i < N; ++i) {
+                if (!is_valid[i]) {
+                    ivox->add_point(points_odom_frame[i]);
+                }
+            }
+        }
+
+        const float converged_thresh_sq =
+            params_.small_point_lio_params.estimator_params.map_resolution / 2.0
+            * params_.small_point_lio_params.estimator_params.map_resolution / 2.0;
         for (size_t i = 0; i < N; ++i) {
             const auto& point_lidar = current_batch.points[i];
             const double dt = point_lidar.timestamp - current_batch.timestamp;
@@ -123,22 +144,20 @@ namespace small_point_lio {
             // combine rotation once and cast result to float
             const Eigen::Vector3d pt_in_odom_d =
                 ((kf_rot * R_delta) * pt_imu_d + kf_pos + kf_vel * dt);
-            points_odom_frame[i] = pt_in_odom_d.cast<float>();
-        }
-        if (s.batch_iter == 0) {
-            valid_ids.clear();
-            valid_ids.reserve(N);
-        }
-        if (s.batch_iter == 1) {
-            std::vector<uint8_t> is_valid(N, 0);
-            for (size_t id: valid_ids)
-                is_valid[id] = 1;
-
-            for (size_t i = 0; i < N; ++i) {
-                if (!is_valid[i]) {
+            Eigen::Vector3f pt_odom_f = pt_in_odom_d.cast<float>();
+            if (s.batch_iter != 0 && is_valid[i]) {
+                //const Eigen::Vector3f diff = pt_odom_f - points_odom_frame[i];
+                auto k_cur = ivox->get_position_index(pt_odom_f);
+                auto k_last = ivox->get_position_index(points_odom_frame[i]);
+                if (k_cur == k_last && point_converged[i] != 1) {
+                    point_converged[i] = 1;
                     ivox->add_point(points_odom_frame[i]);
+                    converged_count++;
+                } else {
+                    point_converged[i] = 0;
                 }
             }
+            points_odom_frame[i] = pt_odom_f;
         }
 
         {
@@ -169,7 +188,9 @@ namespace small_point_lio {
 
                     for (size_t k = r.begin(); k != r.end(); ++k) {
                         const size_t i = ids_to_process[k];
-
+                        if (point_converged[i] == 1) {
+                            continue;
+                        }
                         std::vector<Eigen::Vector3f> near;
                         ivox->get_closest_point(points_odom_frame[i], near, NUM_MATCH_POINTS);
 
@@ -221,7 +242,6 @@ namespace small_point_lio {
 
                         const Eigen::Matrix<state::value_type, 3, 1> normal0 =
                             n.cast<state::value_type>();
-
                         if (ext_on) {
                             const Eigen::Matrix<state::value_type, 3, 1> C =
                                 s.rotation.transpose() * normal0;
@@ -266,7 +286,7 @@ namespace small_point_lio {
                 v.clear();
             }
 
-            processed_point_num = results.size();
+            processed_point_num = valid_ids.size();
         }
     }
     void Estimator::h_point(const state& s, point_measurement_result& measurement_result) {

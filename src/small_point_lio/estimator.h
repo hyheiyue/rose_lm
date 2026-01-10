@@ -39,7 +39,11 @@ namespace small_point_lio {
         Eigen::Matrix<state::value_type, 3, 1> angular_velocity;
         Eigen::Matrix<state::value_type, 3, 1> linear_acceleration;
         double imu_acceleration_scale;
-
+        int converged_count = 0;
+        std::vector<size_t> valid_ids;
+        std::vector<size_t> all_ids;
+        std::vector<uint8_t> point_converged; // 0/1 标记
+        std::vector<uint8_t> is_valid;
         Estimator();
 
         void reset();

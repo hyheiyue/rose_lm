@@ -37,6 +37,11 @@ public:
         double leaf_size,
         int num_threads = 4
     );
+    void voxelgrid_sampling_tbb(
+        const std::vector<rose_lm::common::Point>& points,
+        std::vector<rose_lm::common::Point>& downsampled,
+        double leaf_size
+    );
 };
 
 } // namespace voxelgrid_sampling
