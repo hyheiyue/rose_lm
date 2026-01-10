@@ -12,8 +12,8 @@ rose_lm_node:
             min_distance: 0.5                          # 点云半径最小值，小于该值会被过滤
             max_distance: 1000.0                       # 点云半径最大值，大于该值会被过滤
             point_filter_num: 1
-            space_downsample_leaf_size: 0.1            # 点云降采样时使用的栅格大小
-            batch_interval: 0.001
+            space_downsample_leaf_size: 0.2            # 点云降采样时使用的栅格大小
+            batch_interval: 0.0001
             # IMU处理
             gravity: [0.0, 0.0, -9.810]                # 重力
             fix_gravity_direction: true                # 是否收集前200个IMU数据修正重力方向，重力的大小依旧从gravity参数获得
@@ -23,7 +23,7 @@ rose_lm_node:
             acc_norm: 9.81                             # IMU的加速度模长
 
             # 地图
-            map_resolution: 0.1                        # 地图分辨率
+            map_resolution: 0.2                        # 地图分辨率
             init_map_size: 100                          # 接收到多少个点才初始化地图
 
             # 雷达与IMU相对位姿
@@ -36,8 +36,7 @@ rose_lm_node:
             # 滤波器参数
             max_iter: 3
             # R
-            laser_point_cov: 0.007                      # 激光点的协方差
-            laser_distance_cov_ratio: 1.0
+            laser_point_cov: 0.001                      # 激光点的协方差
             imu_meas_acc_cov: 0.001                     # IMU测量的加速度协方差
             imu_meas_omg_cov: 0.001                     # IMU测量的角速度协方差
             # Q
@@ -48,5 +47,4 @@ rose_lm_node:
             bg_cov: 0.0001                             # 角速度偏置的协方差
             plane_threshold: 0.1                       # 平面匹配阈值，越小表示越严格
             match_sqaured: 81.0                        # 当前点是否在平面上的阈值，越小表示越严格
-            curv_threshold: 0.1
     

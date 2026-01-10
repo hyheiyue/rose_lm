@@ -48,10 +48,12 @@ namespace small_point_lio {
                             )
                             / estimator_->kf.x.gravity.norm();
                         estimator_->kf.x.gravity *= scale;
+
                     } else {
                         estimator_->kf.x.gravity = params_.small_point_lio_params.estimator_params
                                                        .gravity.cast<state::value_type>();
                     }
+                    std::cout << "gravity: " << estimator_->kf.x.gravity.transpose() << std::endl;
                     estimator_->kf.x.acceleration = -estimator_->kf.x.gravity;
                     // init time
                     if (preprocess_->point_batch_deque.empty()) {
@@ -72,6 +74,60 @@ namespace small_point_lio {
                     is_init_ = true;
                 }
                 return;
+            }
+
+            bool is_publish_odometry = !preprocess_->imu_deque.empty()
+                && !preprocess_->point_batch_deque.empty()
+                && preprocess_->point_batch_deque.front().timestamp
+                    < preprocess_->imu_deque.back().timestamp
+                && preprocess_->point_batch_deque.back().timestamp
+                    > preprocess_->imu_deque.front().timestamp;
+            while (!preprocess_->imu_deque.empty() && !preprocess_->point_batch_deque.empty()) {
+                const common::Batch& batch_frame = preprocess_->point_batch_deque.front();
+                const common::ImuMsg& imu_msg = preprocess_->imu_deque.front();
+                if (batch_frame.timestamp < imu_msg.timestamp) {
+                    // point update
+                    if (batch_frame.timestamp < time_current_) {
+                        preprocess_->point_batch_deque.pop_front();
+                        continue;
+                    }
+                    double t_ref = batch_frame.timestamp;
+                    time_current_ = t_ref;
+                    // predict
+                    estimator_->kf.predict_state(time_current_);
+                    estimator_->current_batch = batch_frame;
+                    // update
+                    estimator_->kf.update_iterated_batch();
+                    for (const auto& point: estimator_->points_odom_frame) {
+                        estimator_->ivox->add_point(point);
+                        common::Point point_to_add;
+                        point_to_add.position = point;
+                        pointcloud_odom_frame_.emplace_back(point_to_add);
+                    }
+                    preprocess_->point_batch_deque.pop_front();
+                    used_points += estimator_->processed_point_num;
+                    processed_points += batch_frame.points.size();
+                } else {
+                    // imu update
+                    if (imu_msg.timestamp < time_current_) {
+                        preprocess_->imu_deque.pop_front();
+                        continue;
+                    }
+                    time_current_ = imu_msg.timestamp;
+
+                    // predict
+                    estimator_->kf.predict_state(time_current_);
+                    estimator_->kf.predict_cov(time_current_, Q);
+
+                    // update
+                    estimator_->angular_velocity =
+                        imu_msg.angular_velocity.cast<state::value_type>();
+                    estimator_->linear_acceleration =
+                        imu_msg.linear_acceleration.cast<state::value_type>();
+                    estimator_->kf.update_imu();
+
+                    preprocess_->imu_deque.pop_front();
+                }
             }
             auto hat = [](const Eigen::Vector3d& v) {
                 return (Eigen::Matrix3d() << 0, -v.z(), v.y(), v.z(), 0, -v.x(), -v.y(), v.x(), 0)
@@ -99,59 +155,9 @@ namespace small_point_lio {
                 common::Point point;
                 point.position =
                     ((x.rotation * R) * p + x.position + x.velocity * dt).cast<float>();
-                pointcloud_odom_frame_.emplace_back(point);
+                //pointcloud_odom_frame_.emplace_back(point);
             }
             preprocess_->dense_point_deque.clear();
-            bool is_publish_odometry = !preprocess_->imu_deque.empty()
-                && !preprocess_->point_batch_deque.empty()
-                && preprocess_->point_batch_deque.front().timestamp
-                    < preprocess_->imu_deque.back().timestamp
-                && preprocess_->point_batch_deque.back().timestamp
-                    > preprocess_->imu_deque.front().timestamp;
-            while (!preprocess_->imu_deque.empty() && !preprocess_->point_batch_deque.empty()) {
-                const common::Batch& batch_frame = preprocess_->point_batch_deque.front();
-                const common::ImuMsg& imu_msg = preprocess_->imu_deque.front();
-                if (batch_frame.timestamp < imu_msg.timestamp) {
-                    // point update
-                    if (batch_frame.timestamp < time_current_) {
-                        preprocess_->point_batch_deque.pop_front();
-                        continue;
-                    }
-                    double t_ref = batch_frame.timestamp;
-                    time_current_ = t_ref;
-                    // predict
-                    estimator_->kf.predict_state(time_current_);
-                    estimator_->current_batch = batch_frame;
-                    // update
-                    estimator_->kf.update_iterated_batch();
-                    for (const auto& point: estimator_->points_odom_frame) {
-                        estimator_->ivox->add_point(point);
-                        // pointcloud_odom_frame_.emplace_back(point);
-                    }
-                    preprocess_->point_batch_deque.pop_front();
-                    processed_points += batch_frame.points.size();
-                } else {
-                    // imu update
-                    if (imu_msg.timestamp < time_current_) {
-                        preprocess_->imu_deque.pop_front();
-                        continue;
-                    }
-                    time_current_ = imu_msg.timestamp;
-
-                    // predict
-                    estimator_->kf.predict_state(time_current_);
-                    estimator_->kf.predict_cov(time_current_, Q);
-
-                    // update
-                    estimator_->angular_velocity =
-                        imu_msg.angular_velocity.cast<state::value_type>();
-                    estimator_->linear_acceleration =
-                        imu_msg.linear_acceleration.cast<state::value_type>();
-                    estimator_->kf.update_imu();
-
-                    preprocess_->imu_deque.pop_front();
-                }
-            }
             if (is_publish_odometry) {
                 publishOdometry(time_current_);
 
@@ -195,6 +201,7 @@ namespace small_point_lio {
         bool is_init_ = false;
         std::vector<common::Point> pointcloud_odom_frame_;
         int processed_points = 0;
+        int used_points = 0;
     };
 
 } // namespace small_point_lio

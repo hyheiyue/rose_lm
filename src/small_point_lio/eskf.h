@@ -64,6 +64,7 @@ namespace small_point_lio {
         state::value_type z;
         Eigen::Matrix<state::value_type, 1, 12> H;
         state::value_type laser_point_cov;
+        size_t id;
     };
 
     struct imu_measurement_result { // NOLINT(cppcoreguidelines-pro-type-member-init)
@@ -159,67 +160,111 @@ namespace small_point_lio {
             P = P - K * measurement_result.H * P.template block<12, state::DIM>(0, 0);
             return true;
         }
+        std::vector<point_measurement_result> last_results;
 
         inline bool update_iterated_batch() {
             x.batch_iter = 0;
             bool any_update = false;
+
             const state::value_type tol = static_cast<state::value_type>(1e-6);
             const state::value_type eps = static_cast<state::value_type>(1e-9);
 
-            auto P_saved = P;
+            const auto x0 = x;
+            const auto P0 = P;
+
+            Eigen::LDLT<Eigen::Matrix<state::value_type, state::DIM, state::DIM>> ldlt_P0(P0);
+            if (ldlt_P0.info() != Eigen::Success)
+                return false;
+
             std::vector<point_measurement_result> results;
-            static double total_time = 0.0;
-            auto start = std::chrono::steady_clock::now();
+            auto make_H_full = [&](const auto& H) {
+                Eigen::Matrix<state::value_type, state::DIM, 1> H_full =
+                    Eigen::Matrix<state::value_type, state::DIM, 1>::Zero();
+                H_full.template head<12>() = H.transpose();
+                return H_full;
+            };
+
+            Eigen::Matrix<state::value_type, state::DIM, state::DIM> A;
+            Eigen::Matrix<state::value_type, state::DIM, 1> b;
             for (int iter = 0; iter < max_iter; ++iter) {
                 x.batch_iter = iter;
                 results.clear();
                 h_batch(x, results);
+                last_results = results;
+                A.setZero();
+                b.setZero();
 
-                auto x_iter = x;
-                auto P_iter = P_saved;
-                Eigen::Matrix<state::value_type, state::DIM, 1> delta =
-                    Eigen::Matrix<state::value_type, state::DIM, 1>::Zero();
+                bool has_meas = false;
 
                 for (const auto& meas: results) {
                     if (!meas.valid)
                         continue;
+
+                    has_meas = true;
+
                     const auto& H = meas.H;
                     const auto& z = meas.z;
                     const auto& R = meas.laser_point_cov;
-                    const int count = meas.count;
-                    const auto P_block = P_iter.template block<state::DIM, 12>(0, 0);
-                    Eigen::Matrix<state::value_type, state::DIM, 1> PHT;
-                    PHT.noalias() = P_block * H.transpose();
-                    state::value_type denom = H * PHT.template topRows<12>() + R;
-                    if (denom <= eps)
-                        denom = eps;
-                    auto K = PHT / denom;
-                    auto dx = K * z;
-                    x_iter.plus(dx);
-                    P_iter.noalias() -= K * (H * P_iter.block<12, state::DIM>(0, 0));
-                    delta.noalias() += dx * count;
-                }
-                x = x_iter;
-                P_saved = P_iter;
-                state::value_type delta_norm = delta.norm();
-                if (delta_norm <= tol) {
-                    any_update = (delta_norm > 0);
-                    break;
-                } else {
-                    any_update = true;
-                }
-            }
-            auto end = std::chrono::steady_clock::now();
+                    const auto& count = meas.count;
+                    const state::value_type invR =
+                        static_cast<state::value_type>(1.0) / std::max(R, eps);
 
-            total_time += std::chrono::duration<double>(end - start).count();
-            utils::XSecOnce(
-                [&]() {
-                    std::cout << "esekf iter time: " << total_time * 1000.0 << " ms" << std::endl;
-                    total_time = 0.0;
-                },
-                1.0
-            );
-            P = P_saved;
+                    const auto H_full = make_H_full(H);
+
+                    A.noalias() += invR * count * (H_full * H_full.transpose());
+                    b.noalias() += invR * count * (H_full * z);
+                }
+                if (!has_meas)
+                    break;
+                Eigen::Matrix<state::value_type, state::DIM, state::DIM> HPH = A;
+                HPH.diagonal().array() += eps;
+                HPH += ldlt_P0.solve(
+                    Eigen::Matrix<state::value_type, state::DIM, state::DIM>::Identity()
+                );
+                Eigen::LDLT<decltype(HPH)> ldlt(HPH);
+                if (ldlt.info() != Eigen::Success)
+                    break;
+                Eigen::Matrix<state::value_type, state::DIM, 1> dx = ldlt.solve(b);
+                x.plus(dx);
+
+                if (dx.norm() < tol) {
+                    any_update = true;
+                    break;
+                }
+                any_update = true;
+            }
+            if (any_update) {
+                A.setZero();
+
+                for (const auto& meas: results) {
+                    if (!meas.valid)
+                        continue;
+
+                    const auto& H = meas.H;
+                    const auto& R = meas.laser_point_cov;
+                    const auto& count = meas.count;
+
+                    const state::value_type invR =
+                        static_cast<state::value_type>(1.0) / std::max(R, eps);
+
+                    const auto H_full = make_H_full(H);
+                    A.noalias() += invR * count * (H_full * H_full.transpose());
+                }
+
+                Eigen::Matrix<state::value_type, state::DIM, state::DIM> HPH = A;
+                HPH.diagonal().array() += eps;
+                HPH += ldlt_P0.solve(
+                    Eigen::Matrix<state::value_type, state::DIM, state::DIM>::Identity()
+                );
+
+                Eigen::LDLT<decltype(HPH)> ldlt(HPH);
+                if (ldlt.info() == Eigen::Success)
+                    P = ldlt.solve(
+                        Eigen::Matrix<state::value_type, state::DIM, state::DIM>::Identity()
+                    );
+            }
+
+
             return any_update;
         }
 

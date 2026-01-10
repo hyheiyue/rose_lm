@@ -10,7 +10,7 @@
 namespace rose_lm {
 namespace small_point_lio {
     constexpr int NUM_MATCH_POINTS = 5;
-
+    constexpr int MIN_MATCH_POINTS = 5;
     Estimator::Estimator(Parameters params) {
         params_ = params;
         Lidar_R_wrt_IMU =
@@ -77,27 +77,20 @@ namespace small_point_lio {
             ));
         return cov;
     }
-    static inline Eigen::Matrix3d hat(const Eigen::Vector3d& v) {
-        Eigen::Matrix3d m;
-        m << 0.0, -v.z(), v.y(), v.z(), 0.0, -v.x(), -v.y(), v.x(), 0.0;
-        return m;
-    }
+    std::vector<size_t> valid_ids;
+    std::vector<size_t> all_ids;
     void Estimator::h_batch(const state& s, std::vector<point_measurement_result>& results) {
         results.clear();
         const size_t N = current_batch.points.size();
-        results.reserve(N / 2);
+        results.reserve(N);
 
-        // --- prefetch constants ---
         const bool ext_on = params_.small_point_lio_params.estimator_params.extrinsic_est_en;
-        const Eigen::Matrix3d R_LI_d = ext_on ? kf.x.offset_R_L_I : Lidar_R_wrt_IMU.cast<double>();
-        const Eigen::Vector3d T_LI_d = ext_on ? kf.x.offset_T_L_I : Lidar_T_wrt_IMU.cast<double>();
-        const double wnorm = kf.x.omg.norm();
+        const Eigen::Matrix3d R_LI_d = ext_on ? s.offset_R_L_I : Lidar_R_wrt_IMU.cast<double>();
+        const Eigen::Vector3d T_LI_d = ext_on ? s.offset_T_L_I : Lidar_T_wrt_IMU.cast<double>();
+        const double wnorm = s.omg.norm();
         const double plane_thr = params_.small_point_lio_params.estimator_params.plane_threshold;
         const double match_s = params_.small_point_lio_params.estimator_params.match_sqaured;
         const double laser_cov = params_.small_point_lio_params.estimator_params.laser_point_cov;
-        const double curv_thr = params_.small_point_lio_params.estimator_params.curv_threshold;
-        const double laser_distance_cov_ratio =
-            params_.small_point_lio_params.estimator_params.laser_distance_cov_ratio;
         // Use float for point storage to reduce memory bandwidth (tune to your needs)
         points_odom_frame.clear();
         points_odom_frame.resize(N, Eigen::Vector3f::Zero());
@@ -109,188 +102,171 @@ namespace small_point_lio {
         // Precompute transformed lidar points in IMU frame (pts_imu_f) and odom frame
         const Eigen::Matrix3d& R_LI = R_LI_d;
         const Eigen::Vector3d& T_LI = T_LI_d;
-        const auto kf_rot = kf.x.rotation; // assume double matrix
-        const auto kf_pos = kf.x.position;
-        const auto kf_vel = kf.x.velocity;
-
+        const auto kf_rot = s.rotation; // assume double matrix
+        const auto kf_pos = s.position;
+        const auto kf_vel = s.velocity;
+        const Eigen::Vector3d w = s.omg;
+        auto hat = [](const Eigen::Vector3d& v) {
+            return (Eigen::Matrix3d() << 0, -v.z(), v.y(), v.z(), 0, -v.x(), -v.y(), v.x(), 0)
+                .finished();
+        };
         for (size_t i = 0; i < N; ++i) {
             const auto& point_lidar = current_batch.points[i];
             const double dt = point_lidar.timestamp - current_batch.timestamp;
-
             // pts_imu in double then cast to float once
             const Eigen::Vector3d pt_imu_d = R_LI * point_lidar.position.cast<double>() + T_LI;
             pts_imu_f[i] = pt_imu_d.cast<float>();
-
             // compute small rotation R_delta (first-order approx) in double
             Eigen::Matrix3d R_delta = Eigen::Matrix3d::Identity();
             if (wnorm > 1e-8)
-                R_delta += hat(kf.x.omg * dt);
-
+                R_delta += hat(w / wnorm * (wnorm * dt));
             // combine rotation once and cast result to float
             const Eigen::Vector3d pt_in_odom_d =
-                (kf_rot * R_delta * pt_imu_d + kf_pos + kf_vel * dt);
+                ((kf_rot * R_delta) * pt_imu_d + kf_pos + kf_vel * dt);
             points_odom_frame[i] = pt_in_odom_d.cast<float>();
         }
-        {
-            // static double total_time = 0.0;
-            // auto start = std::chrono::steady_clock::now();
-            // //ivox->get_closest_points_batch(points_odom_frame, neighbors, NUM_MATCH_POINTS);
-            // auto end = std::chrono::steady_clock::now();
-            // total_time += std::chrono::duration<double>(end - start).count();
-            // utils::XSecOnce(
-            //     [&]() {
-            //         std::cout << "ivox get_closest_points_batch time: " << total_time * 1000.0
-            //                   << " ms" << std::endl;
-            //         total_time = 0.0;
-            //     },
-            //     1.0
-            // );
+        if (s.batch_iter == 0) {
+            valid_ids.clear();
+            valid_ids.reserve(N);
+        }
+        if (s.batch_iter == 1) {
+            std::vector<uint8_t> is_valid(N, 0);
+            for (size_t id: valid_ids)
+                is_valid[id] = 1;
+
+            for (size_t i = 0; i < N; ++i) {
+                if (!is_valid[i]) {
+                    ivox->add_point(points_odom_frame[i]);
+                }
+            }
         }
 
         {
-            static double total_time = 0.0;
-            auto start = std::chrono::steady_clock::now();
             // Per-thread result vectors to avoid high-overhead concurrent push
-            tbb::enumerable_thread_specific<std::vector<point_measurement_result>> local_results(
-                []() { return std::vector<point_measurement_result>(); }
-            );
+            // Thread-local containers
+            tbb::enumerable_thread_specific<std::vector<point_measurement_result>> local_results([](
+                                                                                                 ) {
+                std::vector<point_measurement_result> v;
+                v.reserve(128);
+                return v;
+            });
 
-            // Per-thread eigen solver to avoid repeated construction
             tbb::enumerable_thread_specific<Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>>
                 local_solver([]() { return Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(); });
 
-            // Parallel loop
+            constexpr size_t GRAIN = 32;
+
+            if (all_ids.size() != N) {
+                all_ids.resize(N);
+                std::iota(all_ids.begin(), all_ids.end(), 0);
+            }
+            const std::vector<size_t>& ids_to_process = (s.batch_iter == 0) ? all_ids : valid_ids;
             tbb::parallel_for(
-                tbb::blocked_range<size_t>(0, N),
+                tbb::blocked_range<size_t>(0, ids_to_process.size(), GRAIN),
                 [&](const tbb::blocked_range<size_t>& r) {
                     auto& thread_res = local_results.local();
                     auto& solver = local_solver.local();
 
-                    for (size_t i = r.begin(); i != r.end(); ++i) {
+                    for (size_t k = r.begin(); k != r.end(); ++k) {
+                        const size_t i = ids_to_process[k];
+
                         std::vector<Eigen::Vector3f> near;
                         ivox->get_closest_point(points_odom_frame[i], near, NUM_MATCH_POINTS);
-                        //const auto& near = neighbors[i];
-                        if (near.size() < NUM_MATCH_POINTS)
-                            continue;
 
+                        if (near.size() < MIN_MATCH_POINTS)
+                            continue;
                         Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
-                        for (const auto& np: near) {
-                            const Eigen::Vector3d p = np.cast<double>();
-                            centroid += p;
-                        }
+                        for (const auto& np: near)
+                            centroid += np.cast<double>();
                         centroid /= static_cast<double>(near.size());
 
-                        // Compute covariance (3x3) in double - one pass
                         Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
                         for (const auto& np: near) {
-                            const Eigen::Vector3d d = np.cast<double>() - centroid;
+                            Eigen::Vector3d d = np.cast<double>() - centroid;
                             cov.noalias() += d * d.transpose();
                         }
+
                         if (near.size() > 1)
                             cov /= static_cast<double>(near.size() - 1);
                         else
                             continue;
 
-                        // Per-thread solver reuse
                         solver.compute(cov);
-                        if (solver.info() != Eigen::Success)
-                            continue;
-
-                        const Eigen::Vector3d n =
-                            solver.eigenvectors().col(0); // smallest eigenvector
-                        const double lambda0 = solver.eigenvalues()[0];
-                        const double lambda_sum = solver.eigenvalues().sum();
-                        const double curv = lambda0 / (lambda_sum + 1e-9);
-                        if (curv > curv_thr)
-                            continue;
+                        const Eigen::Vector3d n = solver.eigenvectors().col(0);
 
                         const double d_plane = -n.dot(centroid);
 
-                        // quick residual check using float odom point (cheap)
-                        const Eigen::Vector3f pt_odom_f = points_odom_frame[i];
-                        const double d_signed = n.dot(pt_odom_f.cast<double>()) + d_plane;
-
-                        // match_s check: original used pt_lidar.norm() <= match_s * d_signed^2
-                        const double pt_lidar_norm = current_batch.points[i].position.norm();
-                        if (pt_lidar_norm <= match_s * d_signed * d_signed)
-                            continue;
-
-                        // fine-grained point-to-plane check for neighbors (full double)
-                        bool valid = true;
-                        for (const auto& np: near) {
-                            if (std::abs(n.dot(np.cast<double>()) + d_plane) > plane_thr) {
-                                valid = false;
-                                break;
+                        const Eigen::Vector3d pt_odom_d = points_odom_frame[i].cast<double>();
+                        const double d_signed = n.dot(pt_odom_d) + d_plane;
+                        if (s.batch_iter == 0) {
+                            const double pt_norm = current_batch.points[i].position.norm();
+                            if (pt_norm <= match_s * d_signed * d_signed)
+                                continue;
+                            bool valid = true;
+                            for (const auto& np: near) {
+                                if (std::abs(n.dot(np.cast<double>()) + d_plane) > plane_thr) {
+                                    valid = false;
+                                    break;
+                                }
                             }
+                            if (!valid)
+                                continue;
                         }
-                        if (!valid)
-                            continue;
-
-                        // Build measurement result
                         point_measurement_result mr {};
                         mr.valid = true;
-                        mr.laser_point_cov = laser_cov
-                            * log(current_batch.points[i].position.norm() + 1)
-                            * laser_distance_cov_ratio;
                         mr.z = -d_signed;
+                        mr.laser_point_cov = laser_cov;
+                        mr.count = current_batch.points[i].count;
+                        mr.id = i;
 
-                        // Build H
+                        const Eigen::Matrix<state::value_type, 3, 1> normal0 =
+                            n.cast<state::value_type>();
+
                         if (ext_on) {
-                            Eigen::Matrix<state::value_type, 3, 1> normal0 =
-                                n.cast<state::value_type>();
-                            Eigen::Matrix<state::value_type, 3, 1> C;
-                            C.noalias() = s.rotation.transpose() * normal0;
-                            Eigen::Matrix<state::value_type, 3, 1> A, B;
-                            A.noalias() = pts_imu_f[i].cast<state::value_type>().cross(C);
-                            B.noalias() = point_lidar_frame.cast<state::value_type>().cross(
-                                s.offset_R_L_I.transpose() * C
-                            );
+                            const Eigen::Matrix<state::value_type, 3, 1> C =
+                                s.rotation.transpose() * normal0;
+
+                            const Eigen::Matrix<state::value_type, 3, 1> A =
+                                pts_imu_f[i].cast<state::value_type>().cross(C);
+
+                            const Eigen::Matrix<state::value_type, 3, 1> B =
+                                point_lidar_frame.cast<state::value_type>().cross(
+                                    s.offset_R_L_I.transpose() * C
+                                );
+
                             mr.H << normal0.transpose(), A.transpose(), B.transpose(),
                                 C.transpose();
                         } else {
-                            Eigen::Matrix<state::value_type, 3, 1> normal0 =
-                                n.cast<state::value_type>();
-                            Eigen::Matrix<state::value_type, 3, 1> A;
-                            A.noalias() = pts_imu_f[i].cast<state::value_type>().cross(
-                                s.rotation.transpose() * normal0
-                            );
-                            // fill rest with zeros (explicit)
+                            const Eigen::Matrix<state::value_type, 3, 1> A =
+                                pts_imu_f[i].cast<state::value_type>().cross(
+                                    s.rotation.transpose() * normal0
+                                );
+
                             mr.H << normal0.transpose(), A.transpose(), 0.0, 0.0, 0.0, 0.0, 0.0,
                                 0.0;
                         }
-
-                        if (current_batch.points[i].count > 1)
-                            mr.count = current_batch.points[i].count;
 
                         thread_res.emplace_back(std::move(mr));
                     }
                 }
             );
 
-            // Merge thread-local results
+            results.clear();
             size_t total = 0;
             for (auto& v: local_results)
                 total += v.size();
             results.reserve(total);
+
             for (auto& v: local_results) {
-                if (!v.empty()) {
-                    results.insert(
-                        results.end(),
-                        std::make_move_iterator(v.begin()),
-                        std::make_move_iterator(v.end())
-                    );
+                for (auto& mr: v) {
+                    if (s.batch_iter == 0)
+                        valid_ids.push_back(mr.id);
+                    results.emplace_back(std::move(mr));
                 }
+                v.clear();
             }
-            auto end = std::chrono::steady_clock::now();
-            total_time += std::chrono::duration<double>(end - start).count();
-            utils::XSecOnce(
-                [&]() {
-                    std::cout << "tbb_plane_batch time: " << total_time * 1000.0 << " ms"
-                              << std::endl;
-                    total_time = 0.0;
-                },
-                1.0
-            );
+
+            processed_point_num = results.size();
         }
     }
     void Estimator::h_point(const state& s, point_measurement_result& measurement_result) {
@@ -299,12 +275,12 @@ namespace small_point_lio {
         Eigen::Matrix<state::value_type, 3, 1> point_imu_frame;
         if (params_.small_point_lio_params.estimator_params.extrinsic_est_en) {
             point_imu_frame =
-                kf.x.offset_R_L_I * point_lidar_frame.cast<state::value_type>() + kf.x.offset_T_L_I;
+                s.offset_R_L_I * point_lidar_frame.cast<state::value_type>() + s.offset_T_L_I;
         } else {
             point_imu_frame =
                 Lidar_R_wrt_IMU * point_lidar_frame.cast<state::value_type>() + Lidar_T_wrt_IMU;
         }
-        point_odom_frame = (kf.x.rotation * point_imu_frame + kf.x.position).cast<float>();
+        point_odom_frame = (s.rotation * point_imu_frame + s.position).cast<float>();
         ivox->get_closest_point(point_odom_frame, nearest_points, NUM_MATCH_POINTS);
         if (nearest_points.size() != NUM_MATCH_POINTS) {
             return;

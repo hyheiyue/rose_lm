@@ -22,6 +22,7 @@ namespace small_point_lio {
         Parameters params_;
         eskf kf;
         // for h_point
+        int processed_point_num = 0;
         std::shared_ptr<SmallIVox> ivox;
         Eigen::Matrix<state::value_type, 3, 1> Lidar_T_wrt_IMU;
         Eigen::Matrix<state::value_type, 3, 3> Lidar_R_wrt_IMU;

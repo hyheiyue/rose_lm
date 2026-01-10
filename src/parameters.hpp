@@ -41,7 +41,6 @@ public:
             double map_resolution = 0.1;
             bool extrinsic_est_en = false;
             double laser_point_cov = 0.01;
-            double laser_distance_cov_ratio = 0.1;
             double imu_meas_acc_cov = 0.01;
             double imu_meas_omg_cov = 0.01;
 
@@ -52,7 +51,6 @@ public:
             double bg_cov = 0.0001;
             double plane_threshold = 0.1;
             double match_sqaured = 81.0;
-            double curv_threshold = 0.1;
             bool check_satu = true;
             double satu_acc = 3.0;
             double satu_gyro = 35.0;
@@ -77,10 +75,6 @@ public:
                     "small_point_lio.laser_point_cov",
                     laser_point_cov
                 );
-                laser_distance_cov_ratio = node.declare_parameter<double>(
-                    "small_point_lio.laser_distance_cov_ratio",
-                    laser_distance_cov_ratio
-                );
                 imu_meas_acc_cov = node.declare_parameter<double>(
                     "small_point_lio.imu_meas_acc_cov",
                     imu_meas_acc_cov
@@ -104,10 +98,6 @@ public:
                 );
                 match_sqaured =
                     node.declare_parameter<double>("small_point_lio.match_sqaured", match_sqaured);
-                curv_threshold = node.declare_parameter<double>(
-                    "small_point_lio.curv_threshold",
-                    curv_threshold
-                );
                 check_satu = node.declare_parameter<bool>("small_point_lio.check_satu", check_satu);
                 satu_acc = node.declare_parameter<double>("small_point_lio.satu_acc", satu_acc);
                 satu_gyro = node.declare_parameter<double>("small_point_lio.satu_gyro", satu_gyro);

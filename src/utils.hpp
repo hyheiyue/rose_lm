@@ -9,7 +9,7 @@ namespace utils {
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_call).count() >= dt) {
             last_call = now;
-            func(); // 调用你传入的函数
+            func();
         }
     }
 } // namespace utils

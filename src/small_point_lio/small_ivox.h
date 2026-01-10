@@ -64,9 +64,34 @@ namespace small_point_lio {
 
         [[nodiscard]] Eigen::Matrix<uint16_t, 3, 1> get_position_index(const Eigen::Vector3f& pt
         ) const;
-        static constexpr int NEIGHBOR_OFFSETS[7][3] = { { 0, 0, 0 }, { 1, 0, 0 },  { -1, 0, 0 },
-                                                        { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 },
-                                                        { 0, 0, -1 } };
+        // const std::vector<Eigen::Vector3i> neighbor_offs = {
+        //     // 6 face neighbors
+        //     { 0, 0, 0 },
+        //     { 1, 0, 0 },
+        //     { -1, 0, 0 },
+        //     { 0, 1, 0 },
+        //     { 0, -1, 0 },
+        //     { 0, 0, 1 },
+        //     { 0, 0, -1 },
+
+        //     // 12 edge neighbors
+        //     { 1, 1, 0 },
+        //     { 1, -1, 0 },
+        //     { -1, 1, 0 },
+        //     { -1, -1, 0 },
+        //     { 1, 0, 1 },
+        //     { 1, 0, -1 },
+        //     { -1, 0, 1 },
+        //     { -1, 0, -1 },
+        //     { 0, 1, 1 },
+        //     { 0, 1, -1 },
+        //     { 0, -1, 1 },
+        //     { 0, -1, -1 }
+        // };
+        const std::vector<Eigen::Vector3i> neighbor_offs = { { 0, 0, 0 },  { 1, 0, 0 },
+                                                             { -1, 0, 0 }, { 0, 1, 0 },
+                                                             { 0, -1, 0 }, { 0, 0, 1 },
+                                                             { 0, 0, -1 } };
     };
 
     inline __attribute__((always_inline)) uint64_t
@@ -106,10 +131,10 @@ namespace small_point_lio {
         const Eigen::Vector3i base_idx = unpack_position_index(hash_key);
 
         std::vector<Eigen::Vector3f> neighbor_pts;
-        neighbor_pts.reserve(8);
+        neighbor_pts.reserve(neighbor_offs.size());
 
-        for (const auto& off: NEIGHBOR_OFFSETS) {
-            Eigen::Vector3i nidx = base_idx + Eigen::Vector3i(off[0], off[1], off[2]);
+        for (const auto& off: neighbor_offs) {
+            Eigen::Vector3i nidx = base_idx + off;
             uint64_t nkey = pack_position_index(nidx);
             auto iter = grids_map.find(nkey);
             if (iter != grids_map.end())
@@ -157,8 +182,8 @@ namespace small_point_lio {
             std::vector<Eigen::Vector3f> neighbor_pts;
             neighbor_pts.reserve(8);
 
-            for (const auto& off: NEIGHBOR_OFFSETS) {
-                Eigen::Vector3i idx = base_idx + Eigen::Vector3i(off[0], off[1], off[2]);
+            for (const auto& off: neighbor_offs) {
+                Eigen::Vector3i idx = base_idx + off;
                 uint64_t nkey = pack_position_index(idx);
 
                 auto iter = grids_map.find(nkey);

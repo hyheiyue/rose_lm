@@ -37,11 +37,8 @@ public:
         base_frame_ = node_->declare_parameter<std::string>("base_frame", "base_link");
         save_pcd_ = node_->declare_parameter<bool>("save_pcd");
         if (save_pcd_) {
-            RCLCPP_INFO(
-                rclcpp::get_logger("rose_lm"),
-                "enable save pcd "
-            );
-            pcd_mapping = std::make_unique<mapping::PCDMapping>(0.02);
+            RCLCPP_INFO(rclcpp::get_logger("rose_lm"), "enable save pcd ");
+            pcd_mapping = std::make_unique<mapping::PCDMapping>(0.05);
         }
         std::string imu_topic = node_->declare_parameter("imu_topic", "livox/imu");
         imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
@@ -124,12 +121,14 @@ public:
                                               << " | Total Cost: " << stat_cost << " ms"
                                               << " | Processed Points: "
                                               << small_point_lio_->processed_points
+                                              << " | Used Points: " << small_point_lio_->used_points
                     );
 
                     window_start = end;
                     stat_count = 0;
                     stat_cost = 0.0;
                     small_point_lio_->processed_points = 0;
+                    small_point_lio_->used_points = 0;
                 }
             }
         );
@@ -141,9 +140,7 @@ public:
             [this](
                 const std_srvs::srv::Trigger::Request::SharedPtr req,
                 std_srvs::srv::Trigger::Response::SharedPtr res
-            ) {
-                saveMap(req, res);
-            }
+            ) { saveMap(req, res); }
         );
     }
     static Ptr create(rclcpp::Node& node) {
