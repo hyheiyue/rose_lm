@@ -29,6 +29,7 @@ namespace small_point_lio {
             / params_.small_point_lio_params.estimator_params.acc_norm;
         kf.max_iter = params_.small_point_lio_params.estimator_params.max_iter;
         kf.init(
+            params,
             [this](auto&& s, auto&& measurement_result) { return h_point(s, measurement_result); },
             [this](auto&& s, auto&& measurement_result) { return h_imu(s, measurement_result); },
             [this](auto&& s, auto&& measurement_result) { return h_batch(s, measurement_result); }
@@ -77,8 +78,10 @@ namespace small_point_lio {
             ));
         return cov;
     }
+    std::vector<point_measurement_result> all_results;
 
     void Estimator::h_batch(const state& s, std::vector<point_measurement_result>& results) {
+        auto last_results = results;
         results.clear();
         const size_t N = current_batch.points.size();
         results.reserve(N);
@@ -101,6 +104,8 @@ namespace small_point_lio {
             point_converged.resize(N, 0);
             is_valid.clear();
             is_valid.resize(N, 0);
+            all_results.clear();
+            all_results.resize(N, {});
         }
         // pts_imu as float to match odom frame. Compute in double then cast once.
         std::vector<Eigen::Vector3f> pts_imu_f;
@@ -145,14 +150,15 @@ namespace small_point_lio {
             const Eigen::Vector3d pt_in_odom_d =
                 ((kf_rot * R_delta) * pt_imu_d + kf_pos + kf_vel * dt);
             Eigen::Vector3f pt_odom_f = pt_in_odom_d.cast<float>();
-            if (s.batch_iter != 0 && is_valid[i]) {
+            if (s.batch_iter != 0 && point_converged[i] != 1) {
                 //const Eigen::Vector3f diff = pt_odom_f - points_odom_frame[i];
                 auto k_cur = ivox->get_position_index(pt_odom_f);
                 auto k_last = ivox->get_position_index(points_odom_frame[i]);
-                if (k_cur == k_last && point_converged[i] != 1) {
+                if (k_cur == k_last) {
                     point_converged[i] = 1;
                     ivox->add_point(points_odom_frame[i]);
-                    converged_count++;
+                    if (is_valid[i])
+                        converged_count++;
                 } else {
                     point_converged[i] = 0;
                 }
@@ -163,27 +169,17 @@ namespace small_point_lio {
         {
             // Per-thread result vectors to avoid high-overhead concurrent push
             // Thread-local containers
-            tbb::enumerable_thread_specific<std::vector<point_measurement_result>> local_results([](
-                                                                                                 ) {
-                std::vector<point_measurement_result> v;
-                v.reserve(128);
-                return v;
-            });
 
             tbb::enumerable_thread_specific<Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>>
                 local_solver([]() { return Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(); });
-
-            constexpr size_t GRAIN = 32;
-
             if (all_ids.size() != N) {
                 all_ids.resize(N);
                 std::iota(all_ids.begin(), all_ids.end(), 0);
             }
             const std::vector<size_t>& ids_to_process = (s.batch_iter == 0) ? all_ids : valid_ids;
             tbb::parallel_for(
-                tbb::blocked_range<size_t>(0, ids_to_process.size(), GRAIN),
+                tbb::blocked_range<size_t>(0, ids_to_process.size(), ids_to_process.size() / 5),
                 [&](const tbb::blocked_range<size_t>& r) {
-                    auto& thread_res = local_results.local();
                     auto& solver = local_solver.local();
 
                     for (size_t k = r.begin(); k != r.end(); ++k) {
@@ -253,7 +249,6 @@ namespace small_point_lio {
                                 point_lidar_frame.cast<state::value_type>().cross(
                                     s.offset_R_L_I.transpose() * C
                                 );
-
                             mr.H << normal0.transpose(), A.transpose(), B.transpose(),
                                 C.transpose();
                         } else {
@@ -261,29 +256,21 @@ namespace small_point_lio {
                                 pts_imu_f[i].cast<state::value_type>().cross(
                                     s.rotation.transpose() * normal0
                                 );
-
                             mr.H << normal0.transpose(), A.transpose(), 0.0, 0.0, 0.0, 0.0, 0.0,
                                 0.0;
                         }
-
-                        thread_res.emplace_back(std::move(mr));
+                        all_results[i] = mr;
                     }
                 }
             );
-
             results.clear();
-            size_t total = 0;
-            for (auto& v: local_results)
-                total += v.size();
-            results.reserve(total);
-
-            for (auto& v: local_results) {
-                for (auto& mr: v) {
-                    if (s.batch_iter == 0)
-                        valid_ids.push_back(mr.id);
-                    results.emplace_back(std::move(mr));
+            results = all_results;
+            if (s.batch_iter == 0) {
+                for (size_t i = 0; i < results.size(); i++) {
+                    if (results[i].valid) {
+                        valid_ids.push_back(results[i].id);
+                    }
                 }
-                v.clear();
             }
 
             processed_point_num = valid_ids.size();

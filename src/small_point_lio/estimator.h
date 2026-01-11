@@ -33,8 +33,6 @@ namespace small_point_lio {
         std::vector<Eigen::Vector3f> points_odom_frame;
         common::Batch current_batch;
         std::vector<std::vector<Eigen::Vector3f>> neighbors;
-        // std::vector<common::Point> points_lidar_frame;
-        // double time_ref = 0;
         // for h_imu
         Eigen::Matrix<state::value_type, 3, 1> angular_velocity;
         Eigen::Matrix<state::value_type, 3, 1> linear_acceleration;

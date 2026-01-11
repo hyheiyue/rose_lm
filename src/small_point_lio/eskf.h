@@ -5,6 +5,7 @@
  */
 
 #pragma once
+#include "parameters.hpp"
 #include "so3_math.h"
 #include "utils.hpp"
 #include <iostream>
@@ -59,7 +60,7 @@ namespace small_point_lio {
     };
 
     struct point_measurement_result { // NOLINT(cppcoreguidelines-pro-type-member-init)
-        bool valid;
+        bool valid = false;
         int count = 1;
         state::value_type z;
         Eigen::Matrix<state::value_type, 1, 12> H;
@@ -91,15 +92,18 @@ namespace small_point_lio {
         measurement_model_point h_point;
         measurement_model_imu h_imu;
         measurement_model_batch h_batch;
+        Parameters params;
 
     public:
         eskf() = default;
 
         inline void init(
+            Parameters params,
             const measurement_model_point& h_point,
             const measurement_model_imu& h_imu,
             const measurement_model_batch& h_batch
         ) {
+            this->params = params;
             this->h_point = h_point;
             this->h_imu = h_imu;
             this->h_batch = h_batch;
@@ -164,63 +168,87 @@ namespace small_point_lio {
         inline bool update_iterated_batch() {
             x.batch_iter = 0;
             bool any_update = false;
-            const state::value_type tol = static_cast<state::value_type>(1e-6);
+
+            const state::value_type tol = static_cast<state::value_type>(
+                params.small_point_lio_params.estimator_params.converged_threshold
+            );
             const state::value_type eps = static_cast<state::value_type>(1e-9);
 
-            auto P_saved = P;
+            Eigen::Matrix<state::value_type, state::DIM, state::DIM> Lambda = P.inverse();
+
             std::vector<point_measurement_result> results;
-            static double total_time = 0.0;
-            auto start = std::chrono::steady_clock::now();
+
+            // static double total_time = 0.0;
+            // static int count = 0;
+
+            // auto start = std::chrono::steady_clock::now();
+
             for (int iter = 0; iter < max_iter; ++iter) {
                 x.batch_iter = iter;
                 results.clear();
                 h_batch(x, results);
 
-                auto x_iter = x;
-                auto P_iter = P_saved;
-                Eigen::Matrix<state::value_type, state::DIM, 1> delta =
+                Eigen::Matrix<state::value_type, state::DIM, state::DIM> A =
+                    Eigen::Matrix<state::value_type, state::DIM, state::DIM>::Zero();
+                Eigen::Matrix<state::value_type, state::DIM, 1> b =
                     Eigen::Matrix<state::value_type, state::DIM, 1>::Zero();
+
+                int effective_cnt = 0;
 
                 for (const auto& meas: results) {
                     if (!meas.valid)
                         continue;
-                    const auto& H = meas.H;
+
+                    // ++count;
+                    ++effective_cnt;
+
+                    const auto& H = meas.H; // 1×12
                     const auto& z = meas.z;
                     const auto& R = meas.laser_point_cov;
-                    const int count = meas.count;
-                    const auto P_block = P_iter.template block<state::DIM, 12>(0, 0);
-                    Eigen::Matrix<state::value_type, state::DIM, 1> PHT;
-                    PHT.noalias() = P_block * H.transpose();
-                    state::value_type denom = H * PHT.template topRows<12>() + R;
-                    if (denom <= eps)
-                        denom = eps;
-                    auto K = PHT / denom;
-                    auto dx = K * z;
-                    x_iter.plus(dx);
-                    P_iter.noalias() -= K * (H * P_iter.block<12, state::DIM>(0, 0));
-                    delta.noalias() += dx * count;
-                }
-                x = x_iter;
-                P_saved = P_iter;
-                state::value_type delta_norm = delta.norm();
-                if (delta_norm <= tol) {
-                    any_update = (delta_norm > 0);
-                    break;
-                } else {
-                    any_update = true;
-                }
-            }
-            auto end = std::chrono::steady_clock::now();
+                    const auto& count = meas.count;
 
-            total_time += std::chrono::duration<double>(end - start).count();
-            utils::XSecOnce(
-                [&]() {
-                    std::cout << "esekf iter time: " << total_time * 1000.0 << " ms" << std::endl;
-                    total_time = 0.0;
-                },
-                1.0
-            );
-            P = P_saved;
+                    state::value_type invR = state::value_type(1) / std::max(R, eps);
+                    A.topLeftCorner<12, 12>().noalias() += H.transpose() * invR * H * count;
+
+                    b.template head<12>().noalias() += H.transpose() * invR * z * count;
+                }
+
+                if (effective_cnt == 0)
+                    break;
+
+                Eigen::Matrix<state::value_type, state::DIM, state::DIM> Lambda_iter = Lambda + A;
+
+                Eigen::LDLT<Eigen::Matrix<state::value_type, state::DIM, state::DIM>> ldlt(
+                    Lambda_iter
+                );
+                if (ldlt.info() != Eigen::Success)
+                    break;
+
+                Eigen::Matrix<state::value_type, state::DIM, 1> dx = ldlt.solve(b);
+
+                x.plus(dx);
+                Lambda = Lambda_iter;
+                if (dx.norm() <= tol) {
+                    any_update = true;
+                    break;
+                }
+                any_update = true;
+            }
+
+            // auto end = std::chrono::steady_clock::now();
+            // total_time += std::chrono::duration<double>(end - start).count();
+
+            // utils::XSecOnce(
+            //     [&]() {
+            //         std::cout << "esekf iter time: " << total_time * 1000.0
+            //                   << " ms, count: " << count << std::endl;
+            //         total_time = 0.0;
+            //         count = 0;
+            //     },
+            //     1.0
+            // );
+
+            P = Lambda.inverse();
             return any_update;
         }
 

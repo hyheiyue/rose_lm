@@ -55,6 +55,7 @@ public:
             double satu_acc = 3.0;
             double satu_gyro = 35.0;
             double acc_norm = 1.0;
+            double converged_threshold = 0.01;
 
             Eigen::Vector3d extrinsic_T;
             Eigen::Matrix3d extrinsic_R;
@@ -102,6 +103,10 @@ public:
                 satu_acc = node.declare_parameter<double>("small_point_lio.satu_acc", satu_acc);
                 satu_gyro = node.declare_parameter<double>("small_point_lio.satu_gyro", satu_gyro);
                 acc_norm = node.declare_parameter<double>("small_point_lio.acc_norm", acc_norm);
+                converged_threshold = node.declare_parameter<double>(
+                    "small_point_lio.converged_threshold",
+                    converged_threshold
+                );
                 std::vector<double> extrinsic_T_vec = node.declare_parameter<std::vector<double>>(
                     "small_point_lio.extrinsic_T",
                     { 0.0, 0.0, 0.0 }

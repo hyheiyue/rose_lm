@@ -102,7 +102,7 @@ namespace small_point_lio {
                         estimator_->ivox->add_point(point);
                         common::Point point_to_add;
                         point_to_add.position = point;
-                        pointcloud_odom_frame_.emplace_back(point_to_add);
+                       // pointcloud_odom_frame_.emplace_back(point_to_add);
                     }
                     preprocess_->point_batch_deque.pop_front();
                     used_points += estimator_->processed_point_num;
@@ -155,7 +155,7 @@ namespace small_point_lio {
                 common::Point point;
                 point.position =
                     ((x.rotation * R) * p + x.position + x.velocity * dt).cast<float>();
-                //pointcloud_odom_frame_.emplace_back(point);
+                pointcloud_odom_frame_.emplace_back(point);
             }
             preprocess_->dense_point_deque.clear();
             if (is_publish_odometry) {
